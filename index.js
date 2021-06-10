@@ -13,10 +13,18 @@ var uuid = require('uuid');
 app.use(express.json());
 
 // Сервис авторизации
-app.post('/auth', function(req, res) {
-
+app.post('/auth', async function(req, res) {
 
     if (req.body.name && req.body.password) {
+
+        var checkResult = await db.checkDatabase();
+        if (checkResult != true) {
+            res.send({
+                'status': 'error',
+                'message': checkResult
+            });
+            return;
+        }
 
         db.User.findOne({
             where: {
@@ -40,6 +48,7 @@ app.post('/auth', function(req, res) {
                     'status': 'error',
                     'message': 'incorrect login or password'
                 });
+                return;
             }
         });
     } else {
@@ -47,6 +56,7 @@ app.post('/auth', function(req, res) {
             'status': 'error',
             'message': 'Send please name and password to get auth token.'
         });
+        return;
     }
 
 });
@@ -61,12 +71,20 @@ var clients = {};
 var webSocketServer = new WebSocketServer.Server({
     port: 3002
 });
-webSocketServer.on('connection', function(ws) {
+webSocketServer.on('connection', async function(ws) {
 
     ws.user=false;
     console.log("новое соединение ");
 
-    ws.on('message', function(message) {
+    var checkResult = await db.checkDatabase();
+    if (checkResult != true) {
+        ws.send('Произошла ошибка подключения ' + checkResult);
+        ws.close();
+        return;
+    }
+
+
+    ws.on('message', async function(message) {
         console.log('получено сообщение ' + message);
 
         var jsonMessage=false;
@@ -77,81 +95,96 @@ webSocketServer.on('connection', function(ws) {
 
         }
 
-        // Авторизация
-        if (jsonMessage && jsonMessage.search('auth ') != -1) {
+        if (jsonMessage) {
 
-            var match = jsonMessage.match('auth (.+)');
-            var token = match[1];
+            if (jsonMessage.search('auth ') == 0) {
 
-            console.log('Получили токен '+token);
+                        try {
+                            var match = jsonMessage.match('auth (.+)');
+                            var token = match[1];
 
-            // Првоеряем токен
-            var checkResult = db.User.checkToken(token, secret);
-            if (checkResult)
-                checkResult.then(function(user){
-                    if (user) {
-                        console.log('Найден пользователь по токену' + user.id);
-                        ws.send('Авторизован!');
-                        ws.user=user;
-                    } else {
-                        ws.send(JSON.stringify({
-                            'error': 'Incorrect token'
-                        }));
-                        console.log("Некорректный токен", err);
-                        return;
-                    }
-            });
+                            // Првоеряем токен
+                            var checkResult = db.User.checkToken(token, secret);
+                            if (checkResult == false) {
+                                throw 'Incorrect token';
+                            }
+
+                            await checkResult.then(function(user){
+
+                                if (!user) {
+                                    throw 'Incorrect token';
+                                }
+
+                                // Успешная авторизация
+                                console.log('Найден пользователь по токену' + user.id);
+                                ws.send('Авторизован!');
+                                ws.user=user;
+
+                            });
+
+
+                        } catch(err) {
+                            ws.send('Incorrect token');
+                            console.log("Некорректный токен", err);
+                        }
+
+            } else
+            if (jsonMessage.search('history ') == 0) {
+                                    var match = jsonMessage.match(/\d+/);
+                                    var msgCount = match.pop();
+
+                                    if (!msgCount) {
+                                        ws.send('Incorrect history count');
+                                        console.log('Incorrect history count', err);
+                                        return;
+                                    }
+
+                                    // Проверим авторизацию и адекватность запроса
+                                    if (ws.user && msgCount && msgCount>0) {
+
+                                            db.Message.findAll({
+                                                order: [['id', 'desc']],
+                                                limit: parseInt(msgCount)
+                                            }).then(function(messages){
+                                                    console.log("найдено " + messages.length + ' сообщений' );
+
+                                                    // Промисы!
+                                                    var promises=[];
+                                                    messages.forEach(message => {
+                                                            promises.push(
+                                                                new Promise((resolve, reject) => {
+                                                                    ws.send(message.id + '# '+message.content);
+                                                                    resolve();
+                                                                })
+                                                            );
+                                            });
+
+                                            return Promise.all(promises);
+
+                                        }).then(function(items){
+                                            console.log('Отправлено ' + items.length + ' сообщений');
+                                        });
+
+                                    }
+
+            } else {
+
+                ws.send("Неизвестная команда");
+            }
 
             return;
         }
 
-        // Последние 10 сообщений
-        if (jsonMessage && jsonMessage.search('history ') != -1) {
-            var match = jsonMessage.match(/\d+/);
-            var msgCount = match.pop();
 
-
-            // Проверим авторизацию и адекватность запроса
-            if (ws.user && msgCount && msgCount>0) {
-
-                db.Message.findAll({
-                    order: [['id', 'desc']],
-                    limit: parseInt(msgCount)
-                }).then(function(messages){
-                    console.log("найдено " + messages.length + ' сообщений' );
-
-                        // Промисы!
-                        var promises=[];
-                        messages.forEach(message => {
-                            promises.push(
-                                new Promise((resolve, reject) => {
-                                                            ws.send(message.id + '# '+message.content);
-                                                            resolve();
-                                                     })
-                            );
-                        });
-
-                        return Promise.all(promises);
-
-                }).then(function(items){
-                    console.log('Отправлено ' + items.length + ' сообщений');
-                });
-
-            }
-
-          return;
-        }
 
 
         // Проверяем пользователя, делаем броадкаст рассылку, сохраняем сообщение
-        if (ws.user) {
+        if (ws.user && message != '') {
 
             console.log('Сообщение от авторизованного');
 
             // Отправляем всем сообщение
             webSocketServer.clients.forEach(function each(client) {
-
-                console.log("Отправляем клиенту " + client.id);
 
                 if (client.readyState === WebSocketServer.OPEN) {
                    client.send(message);

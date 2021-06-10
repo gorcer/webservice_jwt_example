@@ -34,4 +34,24 @@ Object.keys(db).forEach(modelName => {
 db.sequelize = sequelize;
 db.Sequelize = Sequelize;
 
+db.checkDatabase = async function() {
+    try {
+        await sequelize.authenticate();
+    } catch (error) {
+        console.error('Unable to connect to the database:', error);
+        return 'Unable to connect to the database';
+    }
+
+    try {
+        await db.User.sync();
+        await db.Message.sync();
+    } catch (error) {
+        console.error('Unable to sync tables', error);
+        return 'Unable to sync tables';
+    }
+
+    return true;
+}
+
+
 module.exports = db;
